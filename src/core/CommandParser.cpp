@@ -67,19 +67,29 @@ ParsedMessage CommandParser::parseLine(const QString& rawLine)
 
     case 'S': {
         // S<handle>|<object_name> [key=val ...]
+        //
+        // Object names can be multi-word, e.g. "slice 0", "display pan 0x40000000".
+        // KV tokens always contain '='; object tokens never do.
+        // Find the boundary by locating the last space before the first '='.
         msg.type = MessageType::Status;
         const int pipe = body.indexOf('|');
         if (pipe < 0) break;
         msg.handle = body.left(pipe).toUInt(nullptr, 16);
         const QString statusBody = body.mid(pipe + 1);
 
-        // Split object name from KV pairs
-        const int firstSpace = statusBody.indexOf(' ');
-        if (firstSpace < 0) {
-            msg.object = statusBody;
+        const int firstEq = statusBody.indexOf('=');
+        if (firstEq < 0) {
+            // No KVs — entire body is the object name
+            msg.object = statusBody.trimmed();
         } else {
-            msg.object = statusBody.left(firstSpace);
-            msg.kvs    = parseKVs(statusBody.mid(firstSpace + 1));
+            const int kvStart = statusBody.lastIndexOf(' ', firstEq);
+            if (kvStart < 0) {
+                // Body starts directly with a KV (no object prefix)
+                msg.kvs = parseKVs(statusBody);
+            } else {
+                msg.object = statusBody.left(kvStart).trimmed();
+                msg.kvs    = parseKVs(statusBody.mid(kvStart + 1));
+            }
         }
         break;
     }

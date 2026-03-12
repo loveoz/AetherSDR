@@ -35,6 +35,10 @@ public:
     quint16 localPort() const { return m_localPort; }
     bool    isRunning() const;
 
+    // Update the dBm range used to scale incoming FFT bins.
+    // Called whenever the radio reports min_dbm / max_dbm for the panadapter.
+    void setDbmRange(float minDbm, float maxDbm);
+
 signals:
     void spectrumReady(const QVector<float>& binsDbm);
 
@@ -44,8 +48,11 @@ private slots:
 private:
     void processDatagram(const QByteArray& data);
 
-    QUdpSocket m_socket;
-    quint16    m_localPort{0};
+    QUdpSocket      m_socket;
+    quint16         m_localPort{0};
+    float           m_minDbm{-130.0f};
+    float           m_maxDbm{-20.0f};
+    RadioConnection* m_conn{nullptr};
 };
 
 } // namespace AetherSDR

@@ -34,6 +34,7 @@ FrequencyDial::FrequencyDial(QWidget* parent)
     setFocusPolicy(Qt::WheelFocus);
     setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     setAttribute(Qt::WA_StyledBackground, true);
+    setMouseTracking(true);  // receive mouseMoveEvent without button held
 }
 
 QSize FrequencyDial::sizeHint() const
@@ -124,6 +125,10 @@ void FrequencyDial::paintEvent(QPaintEvent*)
 
     const int top = 8;
 
+    // Triangle size for the up/down click affordances
+    static constexpr int TRI_H = 5;  // triangle height in pixels
+    static constexpr int TRI_W = 7;  // triangle half-width
+
     for (int col = 0; col < NUM_DIGITS; ++col) {
         const int x = columnX(col);
 
@@ -142,7 +147,31 @@ void FrequencyDial::paintEvent(QPaintEvent*)
         const QRect digitRect(x, top, DIGIT_WIDTH, DIGIT_HEIGHT);
         p.drawText(digitRect, Qt::AlignCenter, QString(digits[col]));
 
+        // Up/down triangle affordances — small triangles at the top and bottom
+        // of each digit cell hint that clicking the top/bottom half tunes up/down.
+        const QColor triColor(0x00, 0xb4, 0xd8, leading ? 60 : 120);
+        p.setBrush(triColor);
+        p.setPen(Qt::NoPen);
+
+        const int cx = x + DIGIT_WIDTH / 2;  // column centre x
+
+        // Up-pointing triangle at the very top of the digit cell
+        QPolygon upTri;
+        upTri << QPoint(cx, top + 1)
+              << QPoint(cx - TRI_W, top + 1 + TRI_H)
+              << QPoint(cx + TRI_W, top + 1 + TRI_H);
+        p.drawPolygon(upTri);
+
+        // Down-pointing triangle at the very bottom of the digit cell
+        const int bot = top + DIGIT_HEIGHT;
+        QPolygon downTri;
+        downTri << QPoint(cx, bot - 1)
+                << QPoint(cx - TRI_W, bot - 1 - TRI_H)
+                << QPoint(cx + TRI_W, bot - 1 - TRI_H);
+        p.drawPolygon(downTri);
+
         // Separator dot after col 2 and col 5
+        p.setBrush(Qt::NoBrush);
         if (col == 2 || col == 5) {
             p.setPen(QColor(0x00, 0xb4, 0xd8));
             const QRect dotRect(x + DIGIT_WIDTH, top, DOT_WIDTH, DIGIT_HEIGHT);
@@ -162,9 +191,27 @@ void FrequencyDial::paintEvent(QPaintEvent*)
 
 void FrequencyDial::mousePressEvent(QMouseEvent* ev)
 {
-    m_activeColumn = columnAtX(ev->pos().x());
+    const int col = columnAtX(ev->pos().x());
+    m_activeColumn = col;
     setFocus();
     update();
+
+    if (col < 0) return;
+
+    // Top half of the digit → increment; bottom half → decrement.
+    const int midY   = 8 + DIGIT_HEIGHT / 2;
+    const double delta = placeValueMhz(col);
+    if (ev->pos().y() < midY)
+        setFrequency(m_frequency + delta);
+    else
+        setFrequency(m_frequency - delta);
+}
+
+void FrequencyDial::mouseMoveEvent(QMouseEvent* ev)
+{
+    // Show a vertical-resize cursor over any digit column to hint that
+    // clicking the top/bottom half will tune up or down.
+    setCursor(columnAtX(ev->pos().x()) >= 0 ? Qt::SizeVerCursor : Qt::ArrowCursor);
 }
 
 void FrequencyDial::mouseDoubleClickEvent(QMouseEvent*)

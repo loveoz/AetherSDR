@@ -9,12 +9,18 @@ SliceModel::SliceModel(int id, QObject* parent)
 
 // ─── Setters ──────────────────────────────────────────────────────────────────
 
+// Helper: emit commandReady to send the command immediately (when connected),
+// or queue it for when the connection becomes available.
+void SliceModel::sendCommand(const QString& cmd)
+{
+    emit commandReady(cmd);
+}
+
 void SliceModel::setFrequency(double mhz)
 {
     if (qFuzzyCompare(m_frequency, mhz)) return;
     m_frequency = mhz;
-    // SmartSDR command: "slice tune <id> <freq_in_MHz>"
-    m_pendingCommands << QString("slice tune %1 %2").arg(m_id).arg(mhz, 0, 'f', 6);
+    sendCommand(QString("slice tune %1 %2").arg(m_id).arg(mhz, 0, 'f', 6));
     emit frequencyChanged(mhz);
 }
 
@@ -22,7 +28,7 @@ void SliceModel::setMode(const QString& mode)
 {
     if (m_mode == mode) return;
     m_mode = mode;
-    m_pendingCommands << QString("slice set %1 mode=%2").arg(m_id).arg(mode);
+    sendCommand(QString("slice set %1 mode=%2").arg(m_id).arg(mode));
     emit modeChanged(mode);
 }
 
@@ -30,24 +36,24 @@ void SliceModel::setFilterWidth(int low, int high)
 {
     m_filterLow  = low;
     m_filterHigh = high;
-    m_pendingCommands << QString("slice set %1 filter_lo=%2 filter_hi=%3")
-                             .arg(m_id).arg(low).arg(high);
+    sendCommand(QString("slice set %1 filter_lo=%2 filter_hi=%3")
+                    .arg(m_id).arg(low).arg(high));
     emit filterChanged(low, high);
 }
 
 void SliceModel::setAudioGain(float gain)
 {
     m_audioGain = qBound(0.0f, gain, 100.0f);
-    m_pendingCommands << QString("audio gain 0x%1 slice %2 %3")
-                             .arg(0, 8, 16, QChar('0'))  // stream ID placeholder
-                             .arg(m_id)
-                             .arg(static_cast<int>(m_audioGain));
+    sendCommand(QString("audio gain 0x%1 slice %2 %3")
+                    .arg(0, 8, 16, QChar('0'))
+                    .arg(m_id)
+                    .arg(static_cast<int>(m_audioGain)));
 }
 
 void SliceModel::setRfGain(float gain)
 {
     m_rfGain = gain;
-    m_pendingCommands << QString("slice set %1 rf_gain=%2").arg(m_id).arg(static_cast<int>(gain));
+    sendCommand(QString("slice set %1 rf_gain=%2").arg(m_id).arg(static_cast<int>(gain)));
 }
 
 // ─── Status updates from radio ────────────────────────────────────────────────

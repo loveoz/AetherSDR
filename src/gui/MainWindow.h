@@ -75,6 +75,10 @@ private:
     // Status bar labels
     QLabel* m_connStatusLabel{nullptr};
     QLabel* m_radioInfoLabel{nullptr};
+
+    // Guard: set true while updating controls from the model, so that
+    // onFrequencyChanged / onModeChanged don't echo the change back to the radio.
+    bool m_updatingFromModel{false};
 };
 
 } // namespace AetherSDR

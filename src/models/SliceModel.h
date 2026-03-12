@@ -56,7 +56,7 @@ signals:
 
 private:
     int     m_id{0};
-    double  m_frequency{14.225};   // MHz
+    double  m_frequency{0.0};      // MHz (0 = unset; first status update always fires frequencyChanged)
     QString m_mode{"USB"};
     int     m_filterLow{-1500};
     int     m_filterHigh{1500};
@@ -64,6 +64,8 @@ private:
     bool    m_txSlice{false};
     float   m_rfGain{0.0f};
     float   m_audioGain{50.0f};
+
+    void sendCommand(const QString& cmd);
 
     QStringList m_pendingCommands;
 };

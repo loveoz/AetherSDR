@@ -41,6 +41,7 @@ public:
     quint32 clientHandle() const        { return m_handle; }
     bool isConnected() const            { return m_state == ConnectionState::Connected; }
     QHostAddress radioAddress() const   { return m_socket.peerAddress(); }
+    quint16      localTcpPort() const   { return m_socket.localPort(); }
 
     // Connect to a discovered radio
     void connectToRadio(const RadioInfo& info);

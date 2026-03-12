@@ -70,8 +70,27 @@ void RadioModel::onConnected()
     // to the radio so it learns our address. "client set udpport" is not supported
     // on v1.4.0.0 (returns error 50001000).
     m_panResized = false;
-    if (!m_panStream.isRunning())
+    if (!m_panStream.isRunning()) {
         m_panStream.start(&m_connection);
+
+        // Attempt to register our UDP port with the radio via the TCP command
+        // channel. Returns error 50001000 on firmware v1.4.0.0 (not supported)
+        // but is worth trying — the UDP registration packet sent by start() is
+        // the primary mechanism on that firmware.
+        const quint16 udpPort = m_panStream.localPort();
+        if (udpPort != 0) {
+            m_connection.sendCommand(
+                QString("client set udpport=%1").arg(udpPort),
+                [udpPort](int code, const QString& body) {
+                    if (code == 0)
+                        qDebug() << "RadioModel: UDP port" << udpPort << "registered via client set";
+                    else
+                        qDebug() << "RadioModel: client set udpport returned"
+                                 << Qt::hex << code << body
+                                 << "(UDP registration packet used instead)";
+                });
+        }
+    }
 
     // Request the current slice list.
     // SmartConnect mode: body = "0 1 2 3" — request each slice's state.
@@ -199,7 +218,9 @@ void RadioModel::handleSliceStatus(int id,
             m_connection.sendCommand(cmd);
         });
         m_slices.append(s);
+        s->applyStatus(kvs);  // populate frequency/mode before notifying UI
         emit sliceAdded(s);
+        return;                // applyStatus already called below; skip second call
     }
 
     s->applyStatus(kvs);
@@ -241,6 +262,7 @@ void RadioModel::handlePanadapterStatus(const QMap<QString, QString>& kvs)
     if (kvs.contains("min_dbm") || kvs.contains("max_dbm")) {
         const float minDbm = kvs.value("min_dbm", "-130").toFloat();
         const float maxDbm = kvs.value("max_dbm", "-20").toFloat();
+        m_panStream.setDbmRange(minDbm, maxDbm);
         emit panadapterLevelChanged(minDbm, maxDbm);
         levelChanged = true;
     }

@@ -45,16 +45,8 @@ bool PanadapterStream::start(RadioConnection* conn)
 {
     if (isRunning()) return true;
 
-    // SmartSDR v1.x LAN clients receive VITA-49 data on port 4991.
-    // Try the well-known port first; fall back to OS-assigned if already in use.
-    const quint16 preferredPort = 4991;
-    bool bound = m_socket.bind(QHostAddress::AnyIPv4, preferredPort,
-                               QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint);
-    if (!bound) {
-        qDebug() << "PanadapterStream: port 4991 busy, trying OS-assigned port";
-        bound = m_socket.bind(QHostAddress::AnyIPv4, 0);
-    }
-    if (!bound) {
+    // Bind to an OS-assigned UDP port.
+    if (!m_socket.bind(QHostAddress::AnyIPv4, 0)) {
         qWarning() << "PanadapterStream: failed to bind UDP socket:"
                    << m_socket.errorString();
         return false;
@@ -63,20 +55,17 @@ bool PanadapterStream::start(RadioConnection* conn)
     m_localPort = m_socket.localPort();
     qDebug() << "PanadapterStream: bound to UDP port" << m_localPort;
 
-    // Send a one-byte UDP registration packet to the radio.
-    // The radio (firmware v1.4) learns our IP:port from the source address of this
-    // datagram and directs its VITA-49 stream to us.
-    // "client set udpport" returns error 50001000 on v1.4 and is not used.
+    // Send a one-byte UDP registration packet to the radio's well-known port (4992).
+    // The radio learns our IP:port from the datagram's source address and will
+    // direct subsequent VITA-49 frames here.
+    // "client set udpport" is not supported on firmware v1.4.0.0 (returns 50001000);
+    // this packet is the only way to register on that firmware.
     const QHostAddress radioAddr = conn->radioAddress();
-    if (!radioAddr.isNull()) {
-        const QByteArray regPacket(4, '\0');   // minimal payload
-        qint64 sent = m_socket.writeDatagram(regPacket, radioAddr, 4992);
-        qDebug() << "PanadapterStream: sent UDP registration to"
-                 << radioAddr.toString() << ":4992, bytes sent =" << sent;
-    } else {
-        qWarning() << "PanadapterStream: radio address unknown; UDP stream may not arrive";
-    }
+    const qint64 sent = m_socket.writeDatagram(QByteArray(1, '\x00'), radioAddr, 4992);
+    qDebug() << "PanadapterStream: sent UDP registration to"
+             << radioAddr.toString() << ":4992, bytes sent =" << sent;
 
+    m_conn = conn;
     return true;
 }
 
@@ -87,6 +76,13 @@ void PanadapterStream::stop()
 }
 
 // ─── Datagram reception ───────────────────────────────────────────────────────
+
+void PanadapterStream::setDbmRange(float minDbm, float maxDbm)
+{
+    m_minDbm = minDbm;
+    m_maxDbm = maxDbm;
+    qDebug() << "PanadapterStream: dBm range set to" << minDbm << "->" << maxDbm;
+}
 
 void PanadapterStream::onDatagramReady()
 {
@@ -99,35 +95,45 @@ void PanadapterStream::onDatagramReady()
 
 void PanadapterStream::processDatagram(const QByteArray& data)
 {
-    if (data.size() < VITA49_HEADER_BYTES + 2) {
-        qDebug() << "PanadapterStream: short datagram, size =" << data.size();
-        return;
-    }
+    if (data.size() < VITA49_HEADER_BYTES + 2) return;
 
     const auto* raw = reinterpret_cast<const uchar*>(data.constData());
 
-    // Read stream ID (word 1, bytes 4-7, big-endian).
+    // VITA-49 word 0 (bytes 0-3): packet header.
+    // On FLEX radios, the top byte encodes the packet type:
+    //   0x18... = IF Data (audio)
+    //   0x38... = Extension Data (panadapter FFT)
+    // Only process Extension Data (panadapter) frames.
+    const quint32 word0    = qFromBigEndian<quint32>(raw);
     const quint32 streamId = qFromBigEndian<quint32>(raw + 4);
 
-    qDebug() << "PanadapterStream: datagram" << data.size() << "bytes, streamId ="
-             << QString("0x%1").arg(streamId, 8, 16, QChar('0'));
+    static bool firstSeen = true;
+    if (firstSeen) {
+        firstSeen = false;
+        qDebug() << "PanadapterStream: first datagram" << data.size()
+                 << "bytes, word0=0x" + QString::number(word0, 16)
+                 << "streamId=0x" + QString::number(streamId, 16);
+    }
 
-    // Accept panadapter frames (stream ID 0x40000000–0x40FFFFFF).
-    // Skip waterfall (0x42000000), audio (0x0001xxxx), and others.
-    if ((streamId & 0xFF000000u) != 0x40000000u) return;
+    // Skip IF-Data packets (top byte 0x18 = audio/IF streams).
+    // Accept Extension Data packets (top byte 0x38 = panadapter FFT).
+    if ((word0 >> 24) == 0x18u) return;
 
-    // Payload: signed 16-bit FFT bins, big-endian.
+    // Payload: unsigned 16-bit FFT bins, big-endian.
+    // The radio linearly maps power levels to the display dBm range:
+    //   bin = 0x0000  → m_minDbm
+    //   bin = 0xFFFF  → m_maxDbm
     const int payloadBytes = data.size() - VITA49_HEADER_BYTES;
     const int binCount     = payloadBytes / 2;
     if (binCount <= 0) return;
 
     const uchar* payload = raw + VITA49_HEADER_BYTES;
+    const float  range   = m_maxDbm - m_minDbm;
 
     QVector<float> bins(binCount);
     for (int i = 0; i < binCount; ++i) {
-        const qint16 sample = qFromBigEndian<qint16>(payload + i * 2);
-        // Scale: raw value / 128.0 gives dBm (FLEX VITA-49 convention).
-        bins[i] = static_cast<float>(sample) / 128.0f;
+        const quint16 sample = qFromBigEndian<quint16>(payload + i * 2);
+        bins[i] = m_minDbm + (static_cast<float>(sample) / 65535.0f) * range;
     }
 
     emit spectrumReady(bins);

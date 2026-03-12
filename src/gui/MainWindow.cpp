@@ -315,10 +315,12 @@ void MainWindow::onSliceAdded(SliceModel* s)
     if (m_radioModel.slices().size() == 1)
         updateSliceControls(s);
 
-    // Forward slice frequency changes → spectrum widget
+    // Forward slice frequency/mode changes → controls (guard prevents echo back to radio)
     connect(s, &SliceModel::frequencyChanged, this, [this](double mhz){
+        m_updatingFromModel = true;
         m_spectrum->setSliceFrequency(mhz);
         m_freqDial->setFrequency(mhz);
+        m_updatingFromModel = false;
     });
 }
 
@@ -327,11 +329,12 @@ void MainWindow::onSliceRemoved(int /*id*/) {}
 void MainWindow::updateSliceControls(SliceModel* s)
 {
     if (!s) return;
+    m_updatingFromModel = true;
     m_freqDial->setFrequency(s->frequency());
     m_spectrum->setSliceFrequency(s->frequency());
-
     const int modeIdx = m_modeCombo->findText(s->mode());
     if (modeIdx >= 0) m_modeCombo->setCurrentIndex(modeIdx);
+    m_updatingFromModel = false;
 }
 
 SliceModel* MainWindow::activeSlice() const
@@ -345,13 +348,15 @@ SliceModel* MainWindow::activeSlice() const
 void MainWindow::onFrequencyChanged(double mhz)
 {
     m_spectrum->setSliceFrequency(mhz);
-
-    if (auto* s = activeSlice())
-        s->setFrequency(mhz);
+    if (!m_updatingFromModel) {
+        if (auto* s = activeSlice())
+            s->setFrequency(mhz);
+    }
 }
 
 void MainWindow::onModeChanged(int /*index*/)
 {
+    if (m_updatingFromModel) return;
     const QString mode = m_modeCombo->currentText();
     if (auto* s = activeSlice())
         s->setMode(mode);

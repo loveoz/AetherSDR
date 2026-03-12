@@ -3,22 +3,30 @@
 A Linux-native SmartSDR-compatible client for FlexRadio Systems transceivers,
 built with **Qt6** and **C++20**.
 
+Current version: **0.1.1**
+
 ---
 
-## Features (v0.1 prototype)
+## Features
 
 | Feature | Status |
 |---|---|
 | UDP discovery (port 4992) | ✅ |
 | TCP command/control connection | ✅ |
 | SmartSDR protocol parser (V/H/R/S/M) | ✅ |
+| Multi-word status object parsing (`slice 0`, `display pan 0x...`) | ✅ |
 | Slice model (frequency, mode, filter) | ✅ |
-| Frequency dial widget (scroll/click) | ✅ |
+| Frequency dial — click top/bottom half to tune up/down | ✅ |
+| Frequency dial — scroll wheel tuning | ✅ |
+| Frequency dial — direct keyboard entry (double-click) | ✅ |
+| GUI↔radio frequency sync (no feedback loop) | ✅ |
 | Mode selector (USB/LSB/CW/AM/FM/DIG…) | ✅ |
+| Panadapter VITA-49 UDP stream receiver | ✅ |
+| Panadapter spectrum widget (FFT bins) | ✅ |
+| Panadapter dBm range auto-calibrated from radio | ✅ |
 | Audio RX via VITA-49 UDP + Qt Multimedia | ✅ |
 | Audio TX (microphone → radio) | ✅ |
 | Volume / mute control | ✅ |
-| Panadapter spectrum widget (stub/placeholder) | ✅ |
 | TX button | ✅ |
 | Persistent window geometry | ✅ |
 
@@ -33,6 +41,7 @@ src/
 │   ├── RadioDiscovery.h/.cpp    # UDP broadcast listener (port 4992)
 │   ├── RadioConnection.h/.cpp   # TCP command channel + heartbeat
 │   ├── CommandParser.h/.cpp     # Stateless line parser/builder
+│   ├── PanadapterStream.h/.cpp  # VITA-49 UDP FFT receiver
 │   └── AudioEngine.h/.cpp       # VITA-49 UDP → Qt Multimedia audio
 ├── models/
 │   ├── RadioModel.h/.cpp        # Central radio state, owns connection
@@ -55,6 +64,10 @@ src/
  TCP (4992)        ┌─────────────────────┐
  ──────────────────▶   RadioConnection   │──▶ RadioModel ──▶ SliceModel ──▶ GUI
  Commands ◀────────   (QTcpSocket)       │
+                   └─────────────────────┘
+
+ UDP VITA-49       ┌─────────────────────┐
+ ──────────────────▶  PanadapterStream   │──▶ SpectrumWidget (FFT display)
                    └─────────────────────┘
 
  UDP audio         ┌─────────────────────┐
@@ -87,117 +100,81 @@ cmake --build build -j$(nproc)
 ./build/AetherSDR
 ```
 
-### Debug build (with AddressSanitizer)
-
-```bash
-cmake -B build-dbg -G Ninja -DCMAKE_BUILD_TYPE=Debug
-cmake --build build-dbg -j$(nproc)
-./build-dbg/AetherSDR
-```
-
 ---
 
-## SmartSDR Protocol Notes
+## SmartSDR Protocol Notes (firmware v1.4.0.0)
 
-The protocol is ASCII-based over TCP port 4992.
+### Message format
 
 | Prefix | Direction | Example |
 |--------|-----------|---------|
-| `V`    | Radio→Client | `V3.3.28.0` — firmware version |
-| `H`    | Radio→Client | `H0A1B2C3D` — assigned client handle |
+| `V`    | Radio→Client | `V1.4.0.0` — firmware version |
+| `H`    | Radio→Client | `H479F0832` — assigned client handle |
 | `C`    | Client→Radio | `C1\|sub slice all` — command |
 | `R`    | Radio→Client | `R1\|0\|` — response (0 = OK) |
-| `S`    | Radio→Client | `S0A1B\|slice 0 freq=14.225000 mode=USB` |
-| `M`    | Radio→Client | `M0A1B\|<encoded message>` |
+| `S`    | Radio→Client | `S479F0832\|slice 0 RF_frequency=14.100000 mode=USB` |
+| `M`    | Radio→Client | `M479F0832\|<encoded message>` |
+
+### Status object parsing
+
+Status object names are **multi-word**: `"slice 0"`, `"display pan 0x40000000"`,
+`"interlock band 9"`. The parser finds the split point by locating the last space
+before the first `=` sign in the status body — this correctly separates the object
+name from the key=value pairs.
+
+### Connection sequence (SmartConnect / standalone)
+
+```
+TCP connect to radio:4992
+  ← V<version>
+  ← H<handle>               (client handle assigned)
+  → C|sub slice all
+  → C|sub tx all
+  → C|sub atu all
+  → C|sub meter all
+  → C|client gui            (required before panadapter/slice creation)
+  → C|client program AetherSDR
+  [bind UDP socket, send registration packet to radio:4992]
+  → C|client set udpport=<port>   (returns 50001000 on v1.4.0.0 — expected)
+  → C|slice list
+    ← R|0|0                 (SmartConnect: existing slice IDs)
+    → C|slice get 0
+  ← S|...|slice 0 RF_frequency=14.100000 ...   (subscription push)
+  ← S|...|display pan 0x40000000 center=14.1 bandwidth=0.2 min_dbm=-135 max_dbm=-40 ...
+```
+
+### Firmware v1.4.0.0 quirks
+
+- **`client set udpport`** returns error `0x50001000` ("command not supported").
+  UDP port registration must use the one-byte UDP packet method: bind a local UDP
+  socket, send a single `\x00` byte to `radio:4992`, and the radio learns our
+  IP:port from the datagram source address.
+- **`display panafall create`** returns `0x50000016` on this firmware — use
+  `panadapter create` instead.
+- **Slice frequency** is reported as `RF_frequency` (not `freq`) in status messages.
+- **Panadapter bins** are **unsigned uint16**, linearly mapped:
+  `dbm = min_dbm + (sample / 65535.0) × (max_dbm - min_dbm)`.
+  The `min_dbm` / `max_dbm` values are broadcast in the `display pan` status message.
+- **VITA-49 packet type**: top byte `0x38` = panadapter FFT (Extension Data);
+  top byte `0x18` = audio/IF (skip these in the panadapter stream).
+- **Panadapter stream ID**: `0x04000009` (not `0x40000000` — that is the pan *object* ID).
+
+### GUI↔radio frequency sync
+
+`SliceModel` setters (`setFrequency`, `setMode`, etc.) emit `commandReady`
+immediately, which `RadioModel` routes to `RadioConnection::sendCommand`.
+`MainWindow` uses an `m_updatingFromModel` guard flag to prevent echoing
+model-driven dial updates back to the radio.
 
 ---
 
-## Next Steps — Panadapter & Spectrum Visualization
+## Next Steps
 
-The `SpectrumWidget` is ready to receive data. To complete the panadapter:
-
-### 1. Subscribe & negotiate the panadapter stream
-
-After connecting, send:
-```
-C5|panadapter create
-```
-The radio responds with a stream ID and the UDP port it will use.
-Then send audio stream creation for each panadapter:
-```
-C6|stream create type=panadapter pan=<pan_id>
-```
-
-### 2. Parse VITA-49 panadapter datagrams
-
-Each UDP packet from the panadapter stream has a 28-byte VITA-49 header
-followed by **16-bit signed integer FFT bins** (little-endian), each
-representing `(value / 128.0) - 128.0` dBm.
-
-Add to `AudioEngine` or a new `PanadapterStream` class:
-
-```cpp
-// In a new PanadapterStream class:
-void PanadapterStream::processDatagram(const QByteArray& data)
-{
-    // Skip 28-byte VITA-49 header
-    const int16_t* bins = reinterpret_cast<const int16_t*>(data.constData() + 28);
-    const int numBins   = (data.size() - 28) / 2;
-
-    QVector<float> dbm(numBins);
-    for (int i = 0; i < numBins; ++i)
-        dbm[i] = bins[i] / 128.0f - 128.0f;
-
-    emit spectrumReady(dbm);
-}
-```
-
-Connect `spectrumReady` → `SpectrumWidget::updateSpectrum`.
-
-### 3. Add waterfall history
-
-Extend `SpectrumWidget` with a scrolling `QImage` (waterfall):
-
-```cpp
-// In SpectrumWidget:
-QImage m_waterfall;   // width = numBins, height = history lines
-
-void SpectrumWidget::appendWaterfallLine(const QVector<float>& dbm)
-{
-    // Scroll up by 1 row
-    m_waterfall.scroll(0, 1, m_waterfall.rect());
-    // Map dBm → color for top row
-    for (int x = 0; x < dbm.size(); ++x) {
-        const float norm = (dbm[x] - minDbm) / (maxDbm - minDbm);
-        m_waterfall.setPixelColor(x, 0, dbmToColor(norm));
-    }
-    update();
-}
-```
-
-### 4. Add OpenGL rendering (optional, for high FFT bin counts)
-
-Replace `QPainter` with a `QOpenGLWidget` and upload the FFT data as a 1D
-texture rendered via a simple fragment shader. This allows 4096+ bins at 30 fps
-without CPU-side compositing overhead.
-
-```glsl
-// fragment shader sketch
-uniform sampler1D u_spectrum;
-uniform float u_refLevel;
-uniform float u_dynamicRange;
-
-void main() {
-    float dbm  = texture(u_spectrum, texCoord.x).r;
-    float norm = clamp((u_refLevel - dbm) / u_dynamicRange, 0.0, 1.0);
-    fragColor  = mix(vec4(0,0,0.5,1), vec4(0,1,1,1), norm);
-}
-```
-
-### 5. Add slice filter shading
-
-Draw a translucent rectangle between `filterLow` and `filterHigh` offsets from
-the slice frequency to visually show the passband on the panadapter.
+- [ ] Waterfall display (scrolling `QImage` below the spectrum)
+- [ ] Slice filter passband shading on the spectrum
+- [ ] Multi-slice support (slice tabs or overlaid markers)
+- [ ] Audio RX via VITA-49 stream (pipe to `AudioEngine`)
+- [ ] Band stacking / band map
 
 ---
 
