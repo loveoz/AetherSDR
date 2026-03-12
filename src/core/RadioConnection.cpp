@@ -1,0 +1,173 @@
+#include "RadioConnection.h"
+#include <QDebug>
+
+namespace AetherSDR {
+
+static constexpr int HEARTBEAT_INTERVAL_MS = 5000;  // keepalive ping every 5 s
+
+RadioConnection::RadioConnection(QObject* parent)
+    : QObject(parent)
+{
+    connect(&m_socket, &QTcpSocket::connected,
+            this, &RadioConnection::onSocketConnected);
+    connect(&m_socket, &QTcpSocket::disconnected,
+            this, &RadioConnection::onSocketDisconnected);
+    connect(&m_socket, &QTcpSocket::readyRead,
+            this, &RadioConnection::onReadyRead);
+    connect(&m_socket, &QAbstractSocket::errorOccurred,
+            this, &RadioConnection::onSocketError);
+
+    m_heartbeat.setInterval(HEARTBEAT_INTERVAL_MS);
+    connect(&m_heartbeat, &QTimer::timeout, this, &RadioConnection::onHeartbeat);
+}
+
+RadioConnection::~RadioConnection()
+{
+    disconnectFromRadio();
+}
+
+// ─── Connection management ────────────────────────────────────────────────────
+
+void RadioConnection::connectToRadio(const RadioInfo& info)
+{
+    connectToHost(info.address, info.port);
+}
+
+void RadioConnection::connectToHost(const QHostAddress& address, quint16 port)
+{
+    if (m_state != ConnectionState::Disconnected) {
+        qWarning() << "RadioConnection: already connected or connecting";
+        return;
+    }
+    qDebug() << "RadioConnection: connecting to" << address.toString() << ":" << port;
+    setState(ConnectionState::Connecting);
+    m_socket.connectToHost(address, port);
+}
+
+void RadioConnection::disconnectFromRadio()
+{
+    m_heartbeat.stop();
+    if (m_socket.state() != QAbstractSocket::UnconnectedState)
+        m_socket.disconnectFromHost();
+    m_pendingCallbacks.clear();
+    m_seqCounter = 1;
+    m_handle = 0;
+}
+
+// ─── Command dispatch ─────────────────────────────────────────────────────────
+
+quint32 RadioConnection::sendCommand(const QString& command, ResponseCallback callback)
+{
+    if (!isConnected()) {
+        qWarning() << "RadioConnection::sendCommand: not connected";
+        return 0;
+    }
+    const quint32 seq = m_seqCounter.fetch_add(1);
+    if (callback)
+        m_pendingCallbacks.insert(seq, std::move(callback));
+
+    const QByteArray data = CommandParser::buildCommand(seq, command);
+    qDebug() << "TX:" << data.trimmed();
+    m_socket.write(data);
+    return seq;
+}
+
+// ─── Socket slots ─────────────────────────────────────────────────────────────
+
+void RadioConnection::onSocketConnected()
+{
+    qDebug() << "RadioConnection: TCP connected";
+    // Do NOT set Connected yet — wait for V and H messages from the radio.
+    // The radio sends V<version>\n then H<handle>\n immediately after TCP accept.
+}
+
+void RadioConnection::onSocketDisconnected()
+{
+    qDebug() << "RadioConnection: TCP disconnected";
+    m_heartbeat.stop();
+    setState(ConnectionState::Disconnected);
+    emit disconnected();
+}
+
+void RadioConnection::onSocketError(QAbstractSocket::SocketError /*error*/)
+{
+    const QString msg = m_socket.errorString();
+    qWarning() << "RadioConnection: socket error:" << msg;
+    setState(ConnectionState::Error);
+    emit errorOccurred(msg);
+}
+
+void RadioConnection::onReadyRead()
+{
+    m_readBuffer.append(m_socket.readAll());
+
+    // Process all complete lines (\n-terminated)
+    int newlinePos;
+    while ((newlinePos = m_readBuffer.indexOf('\n')) >= 0) {
+        const QString line = QString::fromUtf8(m_readBuffer.left(newlinePos)).trimmed();
+        m_readBuffer.remove(0, newlinePos + 1);
+        if (!line.isEmpty())
+            processLine(line);
+    }
+}
+
+void RadioConnection::onHeartbeat()
+{
+    sendCommand("keepalive");
+}
+
+// ─── Line processing ──────────────────────────────────────────────────────────
+
+void RadioConnection::processLine(const QString& line)
+{
+    qDebug() << "RX:" << line;
+
+    ParsedMessage msg = CommandParser::parseLine(line);
+    emit messageReceived(msg);
+
+    switch (msg.type) {
+    case MessageType::Version:
+        emit versionReceived(msg.object);
+        break;
+
+    case MessageType::Handle:
+        m_handle = msg.handle;
+        qDebug() << "RadioConnection: assigned handle" << QString::number(m_handle, 16);
+        setState(ConnectionState::Connected);
+        m_heartbeat.start();
+        emit connected();
+
+        // Subscribe to essential status streams after connection
+        sendCommand("sub slice all");
+        sendCommand("sub panadapter all");
+        sendCommand("sub tx all");
+        sendCommand("sub atu all");
+        sendCommand("sub meter all");
+        break;
+
+    case MessageType::Response: {
+        auto it = m_pendingCallbacks.find(msg.sequence);
+        if (it != m_pendingCallbacks.end()) {
+            it.value()(msg.resultCode, msg.object);
+            m_pendingCallbacks.erase(it);
+        }
+        break;
+    }
+
+    case MessageType::Status:
+        emit statusReceived(msg.object, msg.kvs);
+        break;
+
+    default:
+        break;
+    }
+}
+
+void RadioConnection::setState(ConnectionState s)
+{
+    if (m_state == s) return;
+    m_state = s;
+    emit stateChanged(s);
+}
+
+} // namespace AetherSDR
