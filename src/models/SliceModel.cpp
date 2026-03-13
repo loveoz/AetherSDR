@@ -61,7 +61,9 @@ void SliceModel::setTxAntenna(const QString& ant)
 void SliceModel::setLocked(bool locked)
 {
     m_locked = locked;
-    sendCommand(QString("slice set %1 locked=%2").arg(m_id).arg(locked ? 1 : 0));
+    // FlexAPI: "slice lock <id>" / "slice unlock <id>"
+    sendCommand(locked ? QString("slice lock %1").arg(m_id)
+                       : QString("slice unlock %1").arg(m_id));
     emit lockedChanged(locked);
 }
 
@@ -189,8 +191,9 @@ void SliceModel::applyStatus(const QMap<QString, QString>& kvs)
         m_txAntenna = kvs["txant"];
         emit txAntennaChanged(m_txAntenna);
     }
-    if (kvs.contains("locked")) {
-        m_locked = kvs["locked"] == "1";
+    // Status key is "lock" (not "locked") per FlexAPI
+    if (kvs.contains("lock")) {
+        m_locked = kvs["lock"] == "1";
         emit lockedChanged(m_locked);
     }
     if (kvs.contains("qsk")) {
