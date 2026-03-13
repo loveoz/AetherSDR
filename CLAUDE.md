@@ -7,6 +7,19 @@ Replicate the **Windows-only FlexRadio SmartSDR client** (written in C#) as a
 look, feel, and every function SmartSDR is capable of. The reference radio is a
 **FLEX-8600 running firmware v1.4.0.0**.
 
+## AI Agent Guidelines
+
+When helping with AetherSDR:
+- Prefer C++20 / Qt6 idioms (std::ranges, concepts if clean, Qt signals/slots over lambdas when possible)
+- Keep classes small and single-responsibility
+- Use RAII everywhere (no naked new/delete)
+- Comment non-obvious protocol decisions with firmware version
+- When suggesting code: show **diff-style** changes or full function/class if small
+- Test suggestions locally if possible (assume Arch Linux build env)
+- Never suggest Wine/Crossover workarounds — goal is native
+- Flag any proposal that would break slice 0 RX flow
+- If unsure about protocol behavior → ask for logs/wireshark captures first
+
 ## Build
 
 ```bash
