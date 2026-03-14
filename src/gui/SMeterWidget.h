@@ -28,23 +28,54 @@ public:
     // Reading as S-units string (e.g. "S7", "S9+20").
     QString sUnitsText() const;
 
+    enum class TxMode { Power, SWR, Level, Compression };
+    enum class RxMode { SMeter, SMeterPeak };
+
 public slots:
-    // Update the displayed level.  Applies smoothing internally.
+    // Update the displayed RX level (S-meter dBm).
     void setLevel(float dbm);
 
-    // Select meter source: "S-Meter Peak" (default), "Power", "SWR"
-    void setMeterSource(const QString& source) { m_source = source; update(); }
+    // Update TX meter values.
+    void setTxMeters(float fwdPower, float swr);
+
+    // Update mic/compression meter values.
+    void setMicMeters(float micLevel, float compLevel, float micPeak, float compPeak);
+
+    // Switch between RX and TX needle source.
+    void setTransmitting(bool tx);
+
+    // Dropdown-driven mode selection.
+    void setTxMode(const QString& mode);
+    void setRxMode(const QString& mode);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
 
 private:
-    // Map dBm to angle (0.0 = left, 1.0 = right)
+    // Map dBm to fraction (0.0 = left, 1.0 = right) for RX S-meter scale
     float dbmToFraction(float dbm) const;
 
-    float   m_levelDbm{-127.0f};    // current smoothed reading
-    float   m_peakDbm{-127.0f};     // peak hold
+    // Map TX value to fraction based on current TX mode
+    float txValueToFraction(float value) const;
+
+    // Get the current TX value based on mode
+    float currentTxValue() const;
+
+    // RX state
+    float   m_levelDbm{-127.0f};    // current smoothed RX reading
+    float   m_peakDbm{-127.0f};     // RX peak hold
     QString m_source{"S-Meter Peak"};
+
+    // TX meter values (updated continuously, used when transmitting)
+    float   m_txPower{0.0f};
+    float   m_txSwr{1.0f};
+    float   m_micLevel{-50.0f};
+    float   m_compLevel{0.0f};
+
+    // Mode state
+    TxMode  m_txMode{TxMode::Power};
+    RxMode  m_rxMode{RxMode::SMeterPeak};
+    bool    m_transmitting{false};
 
     QTimer  m_peakDecay;
     QTimer  m_peakReset;    // hard reset peak hold every 10 seconds

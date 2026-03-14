@@ -116,6 +116,12 @@ MainWindow::MainWindow(QWidget* parent)
     // ── S-Meter: MeterModel → SMeterWidget ────────────────────────────────
     connect(m_radioModel.meterModel(), &MeterModel::sLevelChanged,
             m_appletPanel->sMeterWidget(), &SMeterWidget::setLevel);
+    connect(m_radioModel.meterModel(), &MeterModel::txMetersChanged,
+            m_appletPanel->sMeterWidget(), &SMeterWidget::setTxMeters);
+    connect(m_radioModel.meterModel(), &MeterModel::micMetersChanged,
+            m_appletPanel->sMeterWidget(), &SMeterWidget::setMicMeters);
+    connect(m_radioModel.transmitModel(), &TransmitModel::moxChanged,
+            m_appletPanel->sMeterWidget(), &SMeterWidget::setTransmitting);
 
     // ── Tuner: MeterModel TX meters → TunerApplet gauges ────────────────
     connect(m_radioModel.meterModel(), &MeterModel::txMetersChanged,

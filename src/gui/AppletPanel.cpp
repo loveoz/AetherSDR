@@ -115,6 +115,12 @@ AppletPanel::AppletPanel(QWidget* parent) : QWidget(parent)
     selectLayout->addLayout(rxCol, 1);
     sMeterLayout->addWidget(selectRow);
 
+    // Wire dropdowns to SMeterWidget mode slots
+    connect(m_txSelect, &QComboBox::currentTextChanged,
+            m_sMeter, &SMeterWidget::setTxMode);
+    connect(m_rxSelect, &QComboBox::currentTextChanged,
+            m_sMeter, &SMeterWidget::setRxMode);
+
     root->addWidget(m_sMeterSection);
 
     // ── Scrollable applet stack ──────────────────────────────────────────────

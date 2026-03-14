@@ -49,6 +49,56 @@ void SMeterWidget::setLevel(float dbm)
         m_peakDecay.start();
     }
 
+    if (!m_transmitting)
+        update();
+}
+
+void SMeterWidget::setTxMeters(float fwdPower, float swr)
+{
+    m_txPower = m_txPower + SMOOTH_ALPHA * (fwdPower - m_txPower);
+    m_txSwr   = m_txSwr   + SMOOTH_ALPHA * (swr - m_txSwr);
+
+    if (m_transmitting && (m_txMode == TxMode::Power || m_txMode == TxMode::SWR))
+        update();
+}
+
+void SMeterWidget::setMicMeters(float micLevel, float compLevel, float micPeak, float compPeak)
+{
+    Q_UNUSED(micLevel);
+    Q_UNUSED(compLevel);
+    m_micLevel  = m_micLevel  + SMOOTH_ALPHA * (micPeak - m_micLevel);
+    // compPeak is negative (e.g. -15 = 15 dB compression), clamp stale values
+    float comp = (compPeak < -30.0f || compPeak >= 0.0f) ? 0.0f : compPeak;
+    m_compLevel = m_compLevel + SMOOTH_ALPHA * (comp - m_compLevel);
+
+    if (m_transmitting && (m_txMode == TxMode::Level || m_txMode == TxMode::Compression))
+        update();
+}
+
+void SMeterWidget::setTransmitting(bool tx)
+{
+    m_transmitting = tx;
+    update();
+}
+
+void SMeterWidget::setTxMode(const QString& mode)
+{
+    if (mode == "Power")            m_txMode = TxMode::Power;
+    else if (mode == "SWR")         m_txMode = TxMode::SWR;
+    else if (mode == "Level")       m_txMode = TxMode::Level;
+    else if (mode == "Compression") m_txMode = TxMode::Compression;
+    update();
+}
+
+void SMeterWidget::setRxMode(const QString& mode)
+{
+    if (mode == "S-Meter") {
+        m_rxMode = RxMode::SMeter;
+        m_source = "S-Meter";
+    } else {
+        m_rxMode = RxMode::SMeterPeak;
+        m_source = "S-Meter Peak";
+    }
     update();
 }
 
@@ -77,6 +127,35 @@ float SMeterWidget::dbmToFraction(float dbm) const
     }
     // Linear within S9..S9+60 → 0.6..1.0
     return 0.6f + 0.4f * (clamped - S9_DBM) / (MAX_DBM - S9_DBM);
+}
+
+float SMeterWidget::txValueToFraction(float value) const
+{
+    switch (m_txMode) {
+    case TxMode::Power:
+        return qBound(0.0f, value / 120.0f, 1.0f);
+    case TxMode::SWR:
+        // 1.0–3.0
+        return qBound(0.0f, (value - 1.0f) / 2.0f, 1.0f);
+    case TxMode::Level:
+        // -40 to +5
+        return qBound(0.0f, (value + 40.0f) / 45.0f, 1.0f);
+    case TxMode::Compression:
+        // -25 to 0 (negative dB, e.g. -15 = 15 dB compression)
+        return qBound(0.0f, (value + 25.0f) / 25.0f, 1.0f);
+    }
+    return 0.0f;
+}
+
+float SMeterWidget::currentTxValue() const
+{
+    switch (m_txMode) {
+    case TxMode::Power:       return m_txPower;
+    case TxMode::SWR:         return m_txSwr;
+    case TxMode::Level:       return m_micLevel;
+    case TxMode::Compression: return m_compLevel;
+    }
+    return 0.0f;
 }
 
 // ─── Paint ───────────────────────────────────────────────────────────────────
@@ -129,25 +208,39 @@ void SMeterWidget::paintEvent(QPaintEvent*)
     }
 
     // ── Draw colored inner arc (TX scale) — 6px gap ──────────────────────
-    // Blue from 0 to ~80 W, red from ~80 to 120 W
     const float arcGap = 6.0f;
+    const QColor blueColor(0x00, 0x80, 0xd0);
+    const QColor redColor(0xff, 0x44, 0x44);
     {
         const float innerR = radius - arcGap;
         const QRectF innerArc(cx - innerR, cy - innerR, innerR * 2, innerR * 2);
 
-        const float splitDeg = qRadiansToDegrees(fractionToAngle(100.0f / 120.0f));
+        // Determine where the arc color splits (fraction where red begins)
+        float redFrac = -1.0f;  // -1 = no red zone
+        switch (m_txMode) {
+        case TxMode::Power:       redFrac = 100.0f / 120.0f; break;
+        case TxMode::SWR:         redFrac = (2.5f - 1.0f) / 2.0f; break; // 0.75
+        case TxMode::Level:       redFrac = (0.0f + 40.0f) / 45.0f; break; // ~0.89
+        case TxMode::Compression: redFrac = -1.0f; break; // all blue
+        }
 
-        QPen bluePen(QColor(0x00, 0x80, 0xd0), 3);
-        p.setPen(bluePen);
-        p.drawArc(innerArc,
-                  static_cast<int>(splitDeg * 16),
-                  static_cast<int>((ARC_END_DEG - splitDeg) * 16));
-
-        QPen redPen(QColor(0xff, 0x44, 0x44), 3);
-        p.setPen(redPen);
-        p.drawArc(innerArc,
-                  static_cast<int>(ARC_START_DEG * 16),
-                  static_cast<int>((splitDeg - ARC_START_DEG) * 16));
+        if (redFrac < 0.0f) {
+            // Entire arc is blue
+            p.setPen(QPen(blueColor, 3));
+            p.drawArc(innerArc,
+                      static_cast<int>(ARC_START_DEG * 16),
+                      static_cast<int>((ARC_END_DEG - ARC_START_DEG) * 16));
+        } else {
+            const float splitDeg = qRadiansToDegrees(fractionToAngle(redFrac));
+            p.setPen(QPen(blueColor, 3));
+            p.drawArc(innerArc,
+                      static_cast<int>(splitDeg * 16),
+                      static_cast<int>((ARC_END_DEG - splitDeg) * 16));
+            p.setPen(QPen(redColor, 3));
+            p.drawArc(innerArc,
+                      static_cast<int>(ARC_START_DEG * 16),
+                      static_cast<int>((splitDeg - ARC_START_DEG) * 16));
+        }
     }
 
     // ── Tick drawing helpers ──────────────────────────────────────────────
@@ -217,7 +310,6 @@ void SMeterWidget::paintEvent(QPaintEvent*)
     };
 
     const QColor whiteColor(0xc8, 0xd8, 0xe8);
-    const QColor redColor(0xff, 0x44, 0x44);
 
     // ── Outside ticks (RX): S-meter scale — odd S-units only ──────────
     for (int s = 1; s <= 9; s += 2) {
@@ -229,24 +321,66 @@ void SMeterWidget::paintEvent(QPaintEvent*)
         drawOutsideTick(dbmToFraction(dbm), QString("+%1").arg(over), redColor, true);
     }
 
-    // ── Inside ticks (TX): Power scale 0–120 W ──────────────────────────
-    // Linear mapping: 0 W → fraction 0.0, 120 W → fraction 1.0
-    const float txMaxW = 120.0f;
-    const QSet<int> txLabeled = {0, 40, 80, 100, 120};
-    const QColor blueColor(0x00, 0x80, 0xd0);
-    for (int watts = 0; watts <= 120; watts += 10) {
-        const float frac = watts / txMaxW;
-        const QString label = QString::number(watts);
-        const QColor& tickColor = (watts >= 100) ? redColor : blueColor;
-        const QColor& lblColor = (watts >= 100) ? redColor : whiteColor;
-        drawInsideTick(frac, label, tickColor, lblColor, txLabeled.contains(watts));
+    // ── Inside ticks (TX): scale depends on TX mode ──────────────────────
+    switch (m_txMode) {
+    case TxMode::Power: {
+        // 0–120 W, ticks every 10 W, labels at 0/40/80/100/120
+        const QSet<int> labeled = {0, 40, 80, 100, 120};
+        for (int w = 0; w <= 120; w += 10) {
+            const float frac = w / 120.0f;
+            const QColor& tc = (w >= 100) ? redColor : blueColor;
+            const QColor& lc = (w >= 100) ? redColor : whiteColor;
+            drawInsideTick(frac, QString::number(w), tc, lc, labeled.contains(w));
+        }
+        break;
+    }
+    case TxMode::SWR: {
+        // 1.0–3.0, ticks at 1, 1.5, 2, 2.5, 3.  Red starting at 2.5.
+        for (float s : {1.0f, 1.5f, 2.0f, 2.5f, 3.0f}) {
+            const float frac = (s - 1.0f) / 2.0f;
+            const bool red = (s >= 2.5f);
+            const QColor& tc = red ? redColor : blueColor;
+            const QColor& lc = red ? redColor : whiteColor;
+            QString label = (s == static_cast<int>(s))
+                ? QString::number(static_cast<int>(s))
+                : QString::number(s, 'f', 1);
+            drawInsideTick(frac, label, tc, lc, true);
+        }
+        break;
+    }
+    case TxMode::Level: {
+        // -40 to +5, ticks at -40, -30, -20, -10, 0.  Red at 0.
+        for (int db : {-40, -30, -20, -10, 0}) {
+            const float frac = (db + 40.0f) / 45.0f;
+            const bool red = (db >= 0);
+            const QColor& tc = red ? redColor : blueColor;
+            const QColor& lc = red ? redColor : whiteColor;
+            drawInsideTick(frac, QString::number(db), tc, lc, true);
+        }
+        break;
+    }
+    case TxMode::Compression: {
+        // -25 to 0, ticks at -25, -20, -15, -10, -5, 0.  All default color.
+        for (int db : {-25, -20, -15, -10, -5, 0}) {
+            const float frac = (db + 25.0f) / 25.0f;
+            drawInsideTick(frac, QString::number(db), blueColor, whiteColor, true);
+        }
+        break;
+    }
     }
 
     // ── Draw needle ──────────────────────────────────────────────────────
     // Needle originates from needleCy (just below widget) rather than the
     // arc center, so the pivot is barely out of frame.
+    // When transmitting, needle tracks the selected TX meter instead of RX.
     {
-        const float frac = dbmToFraction(m_levelDbm);
+        float frac;
+        if (m_transmitting)
+            frac = txValueToFraction(currentTxValue());
+        else if (m_rxMode == RxMode::SMeterPeak)
+            frac = dbmToFraction(m_peakDbm);
+        else
+            frac = dbmToFraction(m_levelDbm);
         const float angle = fractionToAngle(frac);
 
         // Needle extends to the end of the outer (RX) ticks: radius + 14
@@ -263,8 +397,9 @@ void SMeterWidget::paintEvent(QPaintEvent*)
         p.drawLine(QPointF(cx, needleCy), QPointF(tipX, tipY));
     }
 
-    // ── Draw peak marker (small triangle) ────────────────────────────────
-    if (m_peakDbm > m_levelDbm + 1.0f) {
+    // ── Draw peak marker (small triangle) — only in RX S-Meter Peak mode ─
+    if (!m_transmitting && m_rxMode == RxMode::SMeterPeak
+        && m_peakDbm > m_levelDbm + 1.0f) {
         const float frac = dbmToFraction(m_peakDbm);
         const float angle = fractionToAngle(frac);
         const float markerR = radius - 2;
@@ -295,27 +430,58 @@ void SMeterWidget::paintEvent(QPaintEvent*)
     const QFontMetrics sfm(srcFont);
     const int topY = sfm.height() + 2;
 
-    p.setFont(srcFont);
-    p.setPen(QColor(0x80, 0x90, 0xa0));
-    p.drawText((w - sfm.horizontalAdvance(m_source)) / 2, topY, m_source);
+    QFont valFont = font();
+    valFont.setPixelSize(qMax(13, h / 8));
+    valFont.setBold(true);
+    const QFontMetrics vfm(valFont);
 
-    // S-units — top left, larger font
-    QFont sFont = font();
-    sFont.setPixelSize(qMax(13, h / 8));
-    sFont.setBold(true);
-    p.setFont(sFont);
-    p.setPen(QColor(0x00, 0xb4, 0xd8));
-    p.drawText(6, topY, sUnitsText());
+    if (m_transmitting) {
+        // TX mode: show TX source label (center), mode name (left), value (right)
+        static const char* txLabels[] = {"Power", "SWR", "Level", "Compression"};
+        const QString srcLabel = txLabels[static_cast<int>(m_txMode)];
+        p.setFont(srcFont);
+        p.setPen(QColor(0x80, 0x90, 0xa0));
+        p.drawText((w - sfm.horizontalAdvance(srcLabel)) / 2, topY, srcLabel);
 
-    // dBm value — top right, same size as S-units
-    QFont dbmFont = font();
-    dbmFont.setPixelSize(qMax(13, h / 8));
-    dbmFont.setBold(true);
-    p.setFont(dbmFont);
-    const QFontMetrics dfm(dbmFont);
-    const QString dbmText = QString("%1 dBm").arg(m_levelDbm, 0, 'f', 0);
-    p.setPen(QColor(0xc8, 0xd8, 0xe8));
-    p.drawText(w - dfm.horizontalAdvance(dbmText) - 6, topY, dbmText);
+        p.setFont(valFont);
+        // Left: mode name in cyan
+        p.setPen(QColor(0x00, 0xb4, 0xd8));
+        p.drawText(6, topY, "TX");
+
+        // Right: formatted value
+        QString valText;
+        switch (m_txMode) {
+        case TxMode::Power:       valText = QString("%1 W").arg(m_txPower, 0, 'f', 0); break;
+        case TxMode::SWR:         valText = QString("%1").arg(m_txSwr, 0, 'f', 1); break;
+        case TxMode::Level:       valText = QString("%1 dB").arg(m_micLevel, 0, 'f', 0); break;
+        case TxMode::Compression: valText = QString("%1 dB").arg(m_compLevel, 0, 'f', 0); break;
+        }
+        p.setPen(QColor(0xc8, 0xd8, 0xe8));
+        p.drawText(w - vfm.horizontalAdvance(valText) - 6, topY, valText);
+    } else {
+        // RX mode: show source label (center), S-units (left), dBm (right)
+        p.setFont(srcFont);
+        p.setPen(QColor(0x80, 0x90, 0xa0));
+        p.drawText((w - sfm.horizontalAdvance(m_source)) / 2, topY, m_source);
+
+        const float displayDbm = (m_rxMode == RxMode::SMeterPeak) ? m_peakDbm : m_levelDbm;
+
+        p.setFont(valFont);
+        p.setPen(QColor(0x00, 0xb4, 0xd8));
+        // Show S-units based on the displayed value
+        QString sText;
+        if (displayDbm <= S0_DBM) sText = "S0";
+        else if (displayDbm <= S9_DBM) {
+            sText = QString("S%1").arg(qBound(0, qRound((displayDbm - S0_DBM) / DB_PER_S), 9));
+        } else {
+            sText = QString("S9+%1").arg(qRound(displayDbm - S9_DBM));
+        }
+        p.drawText(6, topY, sText);
+
+        const QString dbmText = QString("%1 dBm").arg(displayDbm, 0, 'f', 0);
+        p.setPen(QColor(0xc8, 0xd8, 0xe8));
+        p.drawText(w - vfm.horizontalAdvance(dbmText) - 6, topY, dbmText);
+    }
 }
 
 } // namespace AetherSDR

@@ -706,7 +706,7 @@ void PhoneCwApplet::updateMeters(float micLevel, float compLevel,
     m_levelGauge->setValue(micLevel);
     m_levelGauge->setPeakValue(micPeak);
 
-    float comp = (compPeak < -60.0f || compPeak >= 0.0f) ? 0.0f : compPeak;
+    float comp = (compPeak < -30.0f || compPeak >= 0.0f) ? 0.0f : compPeak;
 
     if (comp < m_compHeld) {
         m_compHeld = comp;
